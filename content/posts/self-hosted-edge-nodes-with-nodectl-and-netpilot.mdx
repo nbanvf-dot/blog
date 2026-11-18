@@ -1,0 +1,146 @@
+---
+title: "多地域轻量节点编排实战：用 nodectl 与 netpilot 驯服散装服务器"
+date: "2026-11-12"
+tags:
+  - "基础设施"
+  - "Linux"
+  - "网络工程"
+  - "自动化"
+summary: "当手头的自建服务器从两台变成十几台，纯靠记忆和零散 Shell 脚本终会失控。本文记录我如何把跨地域节点的初始化、链路测速与边缘流量调度收敛进一套声明式工具链。"
+---
+
+只要折腾自建服务的时间足够长，几乎每个人都会经历同一个拐点：**第 1 台 VPS 是宠物，第 3 台开始变成家务，到了第 10 台就成了随时会半夜报警的债主。**
+
+过去两年里，我在东京、新加坡、法兰克福和美西陆续攒下了十几台不同厂商的轻量节点，跑着反向代理、DNS 分流、私有监控和各种周末写出来的小玩具。为了不再每次重装系统都翻一遍备忘录，我把日常脚本逐步收敛成了两个顺手的小项目：`nodectl` 负责声明式节点初始化与巡检，`netpilot` 负责链路质量探测与路由分流。
+
+这篇笔记整理一下背后的设计取舍与配置范式。
+
+## 为什么不用现成的重型运维套件
+
+在动手造轮子之前，我先后试过 Ansible、SaltStack 以及几款带 Web 面板的探针系统，但它们在“个人独立基础设施”这个尺度上都有点拧巴：
+
+| 方案类型 | 典型代表 | 核心优势 | 个人折腾场景下的痛点 |
+| :--- | :--- | :--- | :--- |
+| 配置管理巨兽 | Ansible / Salt | 生态极全、幂等性成熟 | Python 依赖慢，Playbook 目录层级繁琐，改一行配置像发版 |
+| 云原生集群 | K3s / Nomad | 编排与自愈能力极强 | 控制面内存开销不低，跨公网高延迟高丢包链路下 etcd 极易抖动 |
+| 传统监控面板 | 各类 Agent 面板 | 图表直观、开箱即用 | 需要在每台机器常驻高权限守护进程，且难以直接版本化管理 |
+| **声明式单文件 CLI** | **nodectl + netpilot** | **零远端运行时、纯 Git 驱动** | **只覆盖自己高频使用的 20% 核心原语，但极致轻快** |
+
+对于个人开发者来说，最舒服的状态是：**所有机器的状态都躺在一个 Git 仓库的单一配置文件里，本地敲一行命令，10 秒内完成增量比对与下发。**
+
+## 声明式节点清单设计
+
+在 `nodectl` 中，我砍掉了复杂的模板引擎，只保留最直观的节点拓扑描述：主机连接信息、内核网络参数基线、受管容器/服务单元以及健康检查端点。
+
+### 拓扑配置文件示例
+
+```yaml
+version: "1"
+defaults:
+  ssh_port: 22022
+  user: deploy
+  sysctl:
+    net.core.default_qdisc: fq
+    net.ipv4.tcp_congestion_control: bbr
+    net.ipv4.tcp_fastopen: 3
+
+nodes:
+  - id: tyt-edge-01
+    region: ap-northeast-1
+    host: 203.0.113.18
+    roles: ["ingress", "dns-relay"]
+    services:
+      - name: caddy-proxy
+        unit: caddy.service
+        healthcheck: "https://127.0.0.1:443/healthz"
+
+  - id: fra-core-02
+    region: eu-central-1
+    host: 198.51.100.42
+    roles: ["origin", "metrics"]
+    services:
+      - name: victoria-metrics
+        unit: vmsingle.service
+        healthcheck: "http://127.0.0.1:8428/health"
+```
+
+### 并发巡检与状态收敛
+
+有了这份配置，日常巡检不再需要逐台 SSH 登录敲 `systemctl status`。直接在本地终端运行：
+
+```bash
+# 并发校验全部节点的内核参数、证书剩余有效期与服务健康度
+nodectl check --concurrency 8 --timeout 4s
+
+# 仅针对东京边缘节点执行配置收敛并输出差异摘要
+nodectl apply --filter region=ap-northeast-1 --diff
+```
+
+当某台机器的系统重装后，`nodectl bootstrap` 会在 40 秒内自动完成 SSH 公钥注入、禁用密码登录、开启 `ufw` 最小端口白名单、写入 `sysctl` BBR 参数并拉起受管的 `systemd` 服务。
+
+## 用 netpilot 做动态链路质量感知
+
+节点跑稳之后，第二个头疼的问题是**跨洋晚高峰的路由绕行与局部拥塞**。同一条线路在白天延迟只有 `48ms`，到了晚上九点可能因为骨干网拥塞飙升到 `210ms` 并伴随 `6%` 丢包。
+
+在 `netpilot` 里，我没有采用单纯看 ICMP Ping 均值的粗糙做法，而是用滑动窗口同时采样 **TCP 握手耗时、ICMP 抖动标准差（Jitter）与连续丢包惩罚因子**，计算出一个综合链路健康分。
+
+### 链路评分核心逻辑
+
+下面这段精简后的 TypeScript 代码展示了 `netpilot` 如何对候选出口打分并避免频繁切换带来的连接震荡（Hysteresis）：
+
+```typescript
+export interface LinkSample {
+  nodeId: string;
+  rttMs: number;        // P95 往返时延
+  jitterMs: number;     // 时延标准差
+  lossRate: number;     // 0.0 ~ 1.0 丢包率
+}
+
+export function scoreLink(sample: LinkSample): number {
+  // 对超过 2% 的丢包施加指数级惩罚，避免高带宽但高重传的假快链路
+  const lossPenalty =
+    sample.lossRate <= 0.02
+      ? sample.lossRate * 400
+      : 8 + Math.pow((sample.lossRate - 0.02) * 100, 1.85) * 4;
+
+  const latencyCost = sample.rttMs * 0.65 + sample.jitterMs * 1.4;
+  return Math.max(0, Math.round(1000 - latencyCost - lossPenalty));
+}
+
+export function selectActiveNode(
+  currentId: string,
+  samples: LinkSample[],
+  switchThreshold = 85
+): string {
+  const scored = samples
+    .map((s) => ({ id: s.nodeId, score: scoreLink(s) }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  const current = scored.find((item) => item.id === currentId);
+
+  // 迟滞保护：只有候选节点领先当前节点超过阈值时才触发切换
+  if (current && best.score - current.score < switchThreshold) {
+    return current.id;
+  }
+  return best.id;
+}
+```
+
+### 配合边缘 Worker 实现零停机切流
+
+当 `netpilot` 检测到主用入口连续三个采样周期跌破健康阈值时，不需要修改客户端配置，直接调用 Cloudflare API 或更新 `cfw` 边缘路由键值表，就能在秒级把流量平滑切到备用节点：
+
+1. 探测端每 30 秒汇总各地域探针的 P95 时延与重传率。
+2. 状态机通过迟滞窗口过滤瞬时毛刺，确认主链路劣化后生成新的上游权重表。
+3. 边缘网关读取最新权重，新建立的连接自动落入健康节点，存量长连接自然排空。
+
+## 折腾半年后的三条实用经验
+
+回顾这套自用基础设施的演进过程，最让我受益的反而是几个“克制”的决定：
+
+- **能用无状态单文件解决的事，绝不引入中心化数据库**：配置文件直接进 Git，天然自带审计日志与一键回滚。
+- **把“可观测性”浓缩成每天看得懂的三个指标**：证书还有几天过期、磁盘还剩多少百分比、核心链路过去一小时有没有丢包，其余花哨图表一律关掉。
+- **故障恢复脚本必须经过真实断网演练**：每周用定时任务随机重启一台边缘测试节点，逼自己把所有手工修补动作彻底写进初始化流水线。
+
+工具最终是为人服务的。把底层基础设施收拾得足够安静、透明，才能腾出完整的周末精力去写真正有趣的新产品。

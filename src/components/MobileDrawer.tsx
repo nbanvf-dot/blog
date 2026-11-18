@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { createPortal } from "react-dom";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Menu, X, ArrowUpRight, Mail } from "lucide-react";
@@ -8,7 +9,12 @@ import { siteConfig } from "@/lib/site";
 
 export function MobileDrawer() {
   const [open, setOpen] = React.useState(false);
+  const [mounted, setMounted] = React.useState(false);
   const pathname = usePathname();
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   React.useEffect(() => {
     setOpen(false);
@@ -19,11 +25,17 @@ export function MobileDrawer() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
+    const mql = window.matchMedia("(min-width: 768px)");
+    const onMediaChange = (e: MediaQueryListEvent) => {
+      if (e.matches) setOpen(false);
+    };
     document.body.style.overflow = "hidden";
     window.addEventListener("keydown", onKeyDown);
+    mql.addEventListener("change", onMediaChange);
     return () => {
       document.body.style.overflow = "";
       window.removeEventListener("keydown", onKeyDown);
+      mql.removeEventListener("change", onMediaChange);
     };
   }, [open]);
 
@@ -40,18 +52,20 @@ export function MobileDrawer() {
         <Menu className="h-4 w-4" strokeWidth={1.75} />
       </button>
 
-      {open && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-xs transition-opacity"
-          onClick={() => setOpen(false)}
-          role="dialog"
-          aria-modal="true"
-          aria-label="移动端导航抽屉"
-        >
+      {mounted &&
+        open &&
+        createPortal(
           <div
-            className="flex h-full w-72 max-w-[82vw] flex-col justify-between border-l border-zinc-200 bg-zinc-50 p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[100] flex justify-end bg-black/50 backdrop-blur-xs transition-opacity md:hidden"
+            onClick={() => setOpen(false)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="移动端导航抽屉"
           >
+            <div
+              className="flex h-full w-72 max-w-[82vw] flex-col justify-between overflow-y-auto overscroll-contain border-l border-zinc-200 bg-zinc-50 p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+              onClick={(e) => e.stopPropagation()}
+            >
             <div>
               <div className="flex items-center justify-between border-b border-zinc-200/80 pb-4 dark:border-zinc-800/80">
                 <Link
@@ -141,7 +155,8 @@ export function MobileDrawer() {
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

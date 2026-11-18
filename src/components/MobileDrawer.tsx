@@ -3,14 +3,14 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { Menu, X, ArrowUpRight, Mail } from "lucide-react";
 import { siteConfig } from "@/lib/site";
+import { useActiveNav } from "@/lib/navigation";
 
 export function MobileDrawer() {
   const [open, setOpen] = React.useState(false);
   const [mounted, setMounted] = React.useState(false);
-  const pathname = usePathname();
+  const { pathname, syncHash, isItemActive, handleNavClick } = useActiveNav();
 
   React.useEffect(() => {
     setMounted(true);
@@ -22,6 +22,7 @@ export function MobileDrawer() {
 
   React.useEffect(() => {
     if (!open) return;
+    syncHash();
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
@@ -37,7 +38,13 @@ export function MobileDrawer() {
       window.removeEventListener("keydown", onKeyDown);
       mql.removeEventListener("change", onMediaChange);
     };
-  }, [open]);
+  }, [open, syncHash]);
+
+  const onSelectLink = (href: string) => {
+    document.body.style.overflow = "";
+    setOpen(false);
+    handleNavClick(href);
+  };
 
   return (
     <div className="md:hidden">
@@ -46,7 +53,10 @@ export function MobileDrawer() {
         type="button"
         aria-label="打开导航菜单"
         aria-expanded={open}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          syncHash();
+          setOpen(true);
+        }}
         className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200/80 bg-white text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800"
       >
         <Menu className="h-4 w-4" strokeWidth={1.75} />
@@ -70,7 +80,7 @@ export function MobileDrawer() {
               <div className="flex items-center justify-between border-b border-zinc-200/80 pb-4 dark:border-zinc-800/80">
                 <Link
                   href="/"
-                  onClick={() => setOpen(false)}
+                  onClick={() => onSelectLink("/")}
                   className="font-mono text-sm font-semibold tracking-tight text-zinc-950 dark:text-zinc-50"
                 >
                   {siteConfig.handle}
@@ -90,9 +100,9 @@ export function MobileDrawer() {
               <nav className="mt-6 flex flex-col space-y-1" aria-label="移动端主导航">
                 <Link
                   href="/"
-                  onClick={() => setOpen(false)}
+                  onClick={() => onSelectLink("/")}
                   className={`rounded-md px-3 py-2.5 text-sm font-medium transition-colors ${
-                    pathname === "/"
+                    isItemActive("/")
                       ? "bg-zinc-900 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-950"
                       : "text-zinc-700 hover:bg-zinc-200/60 dark:text-zinc-300 dark:hover:bg-zinc-900"
                   }`}
@@ -100,15 +110,12 @@ export function MobileDrawer() {
                   首页
                 </Link>
                 {siteConfig.nav.map((item) => {
-                  const isActive =
-                    item.href === "/blog"
-                      ? pathname.startsWith("/blog")
-                      : pathname === item.href;
+                  const isActive = isItemActive(item.href);
                   return (
                     <Link
                       key={item.href}
                       href={item.href}
-                      onClick={() => setOpen(false)}
+                      onClick={() => onSelectLink(item.href)}
                       className={`rounded-md px-3 py-2.5 text-sm font-medium transition-colors ${
                         isActive
                           ? "bg-zinc-900 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-950"

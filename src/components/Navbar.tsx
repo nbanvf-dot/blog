@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { siteConfig } from "@/lib/site";
+import { useActiveNav } from "@/lib/navigation";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { MobileDrawer } from "@/components/MobileDrawer";
 
 export function Navbar() {
-  const pathname = usePathname();
+  const { isItemActive, handleNavClick } = useActiveNav();
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-zinc-200/70 bg-zinc-50/85 backdrop-blur-md dark:border-zinc-800/80 dark:bg-zinc-950/85">
@@ -15,6 +15,7 @@ export function Navbar() {
         <Link
           id="navbar-brand-link"
           href="/"
+          onClick={() => handleNavClick("/")}
           className="group inline-flex items-center gap-2.5 text-sm font-semibold tracking-tight text-zinc-950 transition-opacity hover:opacity-80 dark:text-zinc-50"
         >
           <span className="inline-flex h-6 w-6 items-center justify-center rounded border border-zinc-900 bg-zinc-950 font-mono text-xs font-bold text-zinc-50 dark:border-zinc-200 dark:bg-zinc-100 dark:text-zinc-950">
@@ -29,14 +30,12 @@ export function Navbar() {
         <div className="flex items-center gap-2 sm:gap-5">
           <nav className="hidden items-center gap-1 md:flex" aria-label="主导航">
             {siteConfig.nav.map((item) => {
-              const active =
-                item.href === "/blog"
-                  ? pathname.startsWith("/blog")
-                  : pathname === item.href;
+              const active = isItemActive(item.href);
               return (
                 <Link
                   key={item.href}
                   href={item.href}
+                  onClick={() => handleNavClick(item.href)}
                   className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
                     active
                       ? "bg-zinc-200/75 font-medium text-zinc-950 dark:bg-zinc-800/90 dark:text-zinc-50"
